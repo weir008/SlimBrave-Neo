@@ -44,6 +44,12 @@
         "DefaultBraveReferrersSetting": 1,
         "HighEfficiencyModeEnabled": true,
         "HardwareAccelerationModeEnabled": true,
+        "AccessibilityImageLabelsEnabled": false,
+        "BackgroundModeEnabled": false,
+        "DefaultBrowserSettingEnabled": false,
+        "BraveDeAmpEnabled": true,
+        "EnableMediaRouter": false,
+        "BraveWaybackMachineEnabled": false,
         "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache",
         "DiskCacheSize": 2097152000
     }
