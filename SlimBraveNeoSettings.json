@@ -52,5 +52,6 @@
         "BraveWaybackMachineEnabled": false,
         "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache",
         "DiskCacheSize": 2097152000
-    }
+    },
+    "DnsMode": "automatic"
 }
