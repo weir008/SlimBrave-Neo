@@ -563,6 +563,139 @@ def test_sync_does_not_tick_an_integer_row_from_a_bool(mod):
 
 
 # ---------------------------------------------------------------------------
+# Custom policies (Features keys no row claims)
+#
+# macOS only for now: the Windows and Linux ports still drop unknown keys,
+# so these run against MAC_MOD directly instead of the linux/mac `mod` pair.
+
+
+def _custom_header(mod, rows):
+    found = [i for i, r in enumerate(rows)
+             if r["type"] == mod.ROW_HEADER and r.get("custom")]
+    assert len(found) <= 1
+    return found[0] if found else None
+
+
+def test_import_keeps_unknown_features_as_custom_policies(tmp_path):
+    rows = MAC_MOD.build_rows()
+    config = {
+        "MetricsReportingEnabled": False,
+        "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache",
+        "DiskCacheSize": 2097152000,
+    }
+    ok, msg = MAC_MOD.import_settings(
+        rows, str(_write_config(tmp_path, "custom.json", config)))
+    assert ok, msg
+    assert MAC_MOD.custom_policies(rows) == {
+        "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache",
+        "DiskCacheSize": 2097152000,
+    }
+    assert "2 custom policies" in msg
+    # The row is read-only: no key may ever land the cursor on it.
+    assert MAC_MOD.ROW_CUSTOM not in MAC_MOD.SELECTABLE_TYPES
+    # The section sits last, so it never moves another row's index.
+    idx = _custom_header(MAC_MOD, rows)
+    assert idx == len(rows) - 3
+    assert rows[idx]["text"] == MAC_MOD.CUSTOM_HEADER_TEXT
+
+
+def test_custom_policies_reach_the_policy_and_the_export(tmp_path):
+    rows = MAC_MOD.build_rows()
+    path = _write_config(tmp_path, "custom.json", {"DiskCacheSize": 2097152000})
+    assert MAC_MOD.import_settings(rows, str(path))[0]
+    policy, err = MAC_MOD._build_policy(rows)
+    assert err == ""
+    assert policy == {"DiskCacheSize": 2097152000}
+    out = tmp_path / "out.json"
+    ok, msg = MAC_MOD.export_settings(rows, str(out))
+    assert ok, msg
+    assert json.loads(out.read_text())["Features"] == {"DiskCacheSize": 2097152000}
+    # The export is a config again: importing it restores the same keys.
+    again = MAC_MOD.build_rows()
+    assert MAC_MOD.import_settings(again, str(out))[0]
+    assert MAC_MOD.custom_policies(again) == {"DiskCacheSize": 2097152000}
+
+
+def test_import_names_a_custom_value_a_plist_cannot_store(tmp_path):
+    rows = MAC_MOD.build_rows()
+    ok, msg = MAC_MOD.import_settings(rows, str(_write_config(
+        tmp_path, "bad.json",
+        {"DiskCacheSize": None, "DiskCacheDir": ["a", None]})))
+    assert ok, msg
+    assert MAC_MOD.custom_policies(rows) == {}
+    assert "DiskCacheDir" in msg and "DiskCacheSize" in msg
+
+
+def test_import_replaces_the_custom_policies_section(tmp_path):
+    rows = MAC_MOD.build_rows()
+    first = _write_config(tmp_path, "1.json",
+                          {"DiskCacheDir": "a", "DiskCacheSize": 1})
+    assert MAC_MOD.import_settings(rows, str(first))[0]
+    second = _write_config(tmp_path, "2.json", {"DiskCacheSize": 2})
+    assert MAC_MOD.import_settings(rows, str(second))[0]
+    # Import is authoritative: the dropped key goes, the section is not
+    # duplicated, and it stays last.
+    assert MAC_MOD.custom_policies(rows) == {"DiskCacheSize": 2}
+    idx = _custom_header(MAC_MOD, rows)
+    assert idx == len(rows) - 2
+    empty = _write_config(tmp_path, "3.json", {})
+    assert MAC_MOD.import_settings(rows, str(empty))[0]
+    assert _custom_header(MAC_MOD, rows) is None
+
+
+def test_legacy_array_format_creates_no_custom_rows(tmp_path):
+    rows = MAC_MOD.build_rows()
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"Features": ["DiskCacheDir"]}))
+    ok, msg = MAC_MOD.import_settings(rows, str(path))
+    assert ok, msg
+    # An array carries no values, so there is nothing to write.
+    assert MAC_MOD.custom_policies(rows) == {}
+
+def test_mac_apply_writes_and_reset_clears_custom_policies(mac, tmp_path):
+    stable, = _mac_installs(mac, "stable")
+    _put_plist(mac.plist("stable"), {"URLBlocklist": ["x"]})
+    rows = _mac_rows()
+    path = _write_config(tmp_path, "custom.json", {
+        "DiskCacheSize": 2097152000,
+        "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache",
+    })
+    assert MAC_DARWIN.import_settings(rows, str(path))[0]
+    _check_feature(MAC_DARWIN, rows, "Disable Tor")
+    ok, msg = MAC_DARWIN.apply_policy(rows, [stable], persist_mode="off")
+    assert ok, msg
+    assert _get_plist(mac.plist("stable")) == {
+        "URLBlocklist": ["x"], "TorDisabled": True,
+        "DiskCacheSize": 2097152000,
+        "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache",
+    }
+    ok, msg = MAC_DARWIN.reset_policy(rows, [stable])
+    assert ok, msg
+    # Reset clears what it wrote, custom keys included, and keeps the
+    # foreign key; the section itself is gone from the list.
+    assert _get_plist(mac.plist("stable")) == {"URLBlocklist": ["x"]}
+    assert _custom_header(MAC_DARWIN, rows) is None
+
+
+def test_custom_policies_section_paints_at_the_end(monkeypatch, tmp_path):
+    rows = MAC_MOD.build_rows()
+    path = _write_config(tmp_path, "custom.json", {
+        "DiskCacheDir": "${users}/will/.tmpdisk/RamDisk/BraveCache"})
+    assert MAC_MOD.import_settings(rows, str(path))[0]
+    monkeypatch.setattr(MAC_MOD, "curses", _FakeCurses())
+    monkeypatch.setattr(MAC_MOD, "_box_glyphs", MAC_MOD.BOX_ASCII)
+    monkeypatch.setattr(MAC_MOD, "_disclosure_glyphs", MAC_MOD.DISCLOSURE_ASCII)
+    screen = _GridScreen(24, 80)
+    visible = MAC_MOD.viewport_rows(screen)
+    MAC_MOD.draw(screen, rows, -1, len(rows) - visible, MAC_MOD.FOCUS_LIST, 0,
+                 "", True, "")
+    frame = screen.frames[-1]
+    assert any("Custom Policies" in line for line in frame)
+    assert any("DiskCacheDir = ${users}/will/.tmpdisk/RamDisk/BraveCache" in line
+               for line in frame)
+
+
+# ---------------------------------------------------------------------------
 # BOM-aware JSON reader (PowerShell export compatibility)
 # ---------------------------------------------------------------------------
 

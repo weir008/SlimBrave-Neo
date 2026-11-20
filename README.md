@@ -546,7 +546,27 @@ SlimBrave Neo writes Chromium [managed enterprise policies](https://chromeenterp
 - Auto-detects Brave installations: Arch (`brave-bin`, `brave-origin-bin`), deb/rpm (`brave-browser`, `brave-origin`), Flatpak, Snap, macOS App (Stable / Beta / Nightly; not Brave Origin), and PATH fallback; on Linux, Brave Origin is reported as its own channel
 - Reads existing policies on startup and pre-checks matching features; on macOS, the Apply-time channel prompt pre-ticks channels that already have a SlimBrave-managed policy (sticky default)
 - Apply rewrites every key SlimBrave Neo manages, so unchecked features are cleanly removed. On Linux the policy file is SlimBrave Neo's own. On macOS each channel's plist is shared, so keys SlimBrave Neo does not manage stay, and Reset deletes the plist only when nothing else is left in it.
-- Import/export compatible with the Windows PowerShell version: all three scripts now export UTF-8 without a BOM, and all three still read the UTF-16 files older PowerShell exports produced
+- Import/export compatible with the Windows PowerShell version: all three scripts now export UTF-8 without a BOM, and all three still read the UTF-16 files older PowerShell exports produced. Keys with no row are kept only by `slimbrave-mac.py` (see Custom policies below); the Windows and Linux scripts still drop them.
+
+---
+
+<details>
+<summary><strong>Custom policies (macOS)</strong></summary>
+
+Any `Features` key SlimBrave Neo has no row for is carried through as a custom policy: Import keeps it, Apply writes it, Export saves it back, and the TUI lists it at the end under **Custom Policies** — read-only, so edit the config file to change one. Reset removes it, like every other key SlimBrave Neo wrote. Custom policies live in the config file rather than on disk, so import (or `--import`, which applies in the same run) each time you want one written. Three things are left out instead, and the Import status names them: keys SlimBrave Neo retired, `DynamicCodeSettings` (Windows only), and any value a plist cannot store (JSON `null`).
+
+Values are Chromium policy values. A path policy wants Chromium's variables, not a shell's `~`: Chromium expands `${user_name}` and `${machine_name}` — plus `${users}` and `${documents}` on macOS — while a literal `~` becomes a directory actually named `~`.
+
+```json
+"Features": {
+    "DiskCacheDir": "${users}/you/.tmpdisk/RamDisk/BraveCache",
+    "DiskCacheSize": 2097152000
+}
+```
+
+`DiskCacheSize` is in bytes. A custom key dropped from a later config stays in an existing plist — macOS merges the keys SlimBrave Neo does not manage — so remove it by hand once the config no longer names it. Reset removes the custom keys the imported config still carries.
+
+</details>
 
 ---
 

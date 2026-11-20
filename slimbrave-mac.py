@@ -944,6 +944,12 @@ ROW_FEATURE = 1
 ROW_DNS = 2
 ROW_DNS_TEMPLATE = 3
 ROW_CHOICE = 4
+# A policy key the imported config carries but SlimBrave has no row for.
+# Read-only: it is written by Apply and saved by Export, and changed by
+# editing the config file.
+ROW_CUSTOM = 5
+
+CUSTOM_HEADER_TEXT = "Custom Policies"
 
 
 def build_rows(installations=None):
@@ -1023,6 +1029,31 @@ def get_dns_template(rows):
         if row["type"] == ROW_DNS_TEMPLATE:
             return row["value"]
     return ""
+
+
+def custom_policies(rows):
+    """The {key: value} pairs the Custom Policies section carries."""
+    return {row["key"]: row["value"] for row in rows
+            if row["type"] == ROW_CUSTOM}
+
+
+def set_custom_rows(rows, mapping):
+    """Replace the Custom Policies section with `mapping`.
+
+    Rebuilt whole so a re-import can neither duplicate nor leave a stale
+    key behind. It always sits last, so adding or dropping it never moves
+    another row's index.
+    """
+    idx = next((i for i, row in enumerate(rows)
+                if row["type"] == ROW_HEADER and row.get("custom")), None)
+    if idx is not None:
+        del rows[idx:header_span(rows, idx)[1]]
+    if not mapping:
+        return
+    rows.append({"type": ROW_HEADER, "text": CUSTOM_HEADER_TEXT,
+                 "collapsed": False, "custom": True})
+    for key in sorted(mapping):
+        rows.append({"type": ROW_CUSTOM, "key": key, "value": mapping[key]})
 
 
 def toggle_feature_row(rows, target):
@@ -1861,6 +1892,13 @@ RETIRED_POLICIES = {
 # It is not retired on Windows or Linux, where a row still writes it.
 MAC_ONLY_RETIRED_POLICIES = {"BackgroundModeEnabled": False}
 
+# Keys a config may name that this platform still must not write: the
+# retired ones (Brave ignores them, and Apply/Reset sweep leftovers), plus
+# DynamicCodeSettings, which only SlimBrave.ps1 offers. A config naming one
+# is not asking for a custom policy.
+NOT_CUSTOM_POLICIES = (set(RETIRED_POLICIES) | set(MAC_ONLY_RETIRED_POLICIES)
+                       | {"DynamicCodeSettings"})
+
 
 def _managed_keys():
     """Every key a row writes on this platform, plus the two DNS keys."""
@@ -1949,6 +1987,8 @@ def _build_policy(rows):
             dns_mode = row["options"][row["selected"]]
         elif row["type"] == ROW_DNS_TEMPLATE:
             dns_template = row["value"].strip()
+        elif row["type"] == ROW_CUSTOM:
+            policy[row["key"]] = row["value"]
 
     # Refuse to write a broken DNS config: "secure" (or "custom", which
     # maps to it) without a template URL sets DnsOverHttpsMode=secure with
@@ -1996,6 +2036,9 @@ def _write_one_policy(plist_path, policy):
             os.umask(old_umask)
         if IS_MAC:
             managed = _managed_keys()
+            # shortcut: a custom key dropped from the config stays in the
+            # plist, because nothing on disk records which keys SlimBrave
+            # imported; upgrade if the tool ever keeps state of its own.
             merged = {k: v for k, v in _read_one_policy(plist_path).items()
                       if k not in managed and not _is_retired(k, v)}
             merged.update(policy)
@@ -2013,20 +2056,20 @@ def _write_one_policy(plist_path, policy):
     return True, ""
 
 
-def _strip_managed(plist_path):
+def _strip_managed(plist_path, extra=()):
     """Remove SlimBrave's keys from a shared macOS plist.
 
     Drops every key SlimBrave manages and every retired key still holding
-    the value an earlier version wrote; whatever else is there is written
-    back, and a plist left with nothing in it is deleted. Returns
-    (changed, kept): whether the file changed, and how many keys it still
-    holds. A missing plist is (False, 0). Raises OSError when it cannot be
-    rewritten or deleted.
+    the value an earlier version wrote; `extra` adds keys this run imported
+    as custom policies. Whatever else is there is written back, and a plist
+    left with nothing in it is deleted. Returns (changed, kept): whether the
+    file changed, and how many keys it still holds. A missing plist is
+    (False, 0). Raises OSError when it cannot be rewritten or deleted.
     """
     if not os.path.exists(plist_path):
         return False, 0
     data = _read_one_policy(plist_path)
-    managed = _managed_keys()
+    managed = _managed_keys() | set(extra)
     kept = {k: v for k, v in data.items() if k not in managed and not _is_retired(k, v)}
     if not kept:
         os.remove(plist_path)
@@ -2366,9 +2409,10 @@ def reset_policy(rows, installations=None, selected_channel_ids=None,
 
     cleared_labels = []
     try:
+        custom = set(custom_policies(rows))
         for plist_path, label in targets:
             if IS_MAC:
-                _strip_managed(plist_path)
+                _strip_managed(plist_path, custom)
             elif os.path.exists(plist_path):
                 os.remove(plist_path)
             if label:
@@ -2387,6 +2431,7 @@ def reset_policy(rows, installations=None, selected_channel_ids=None,
                 row["value"] = ""
                 row["cursor"] = 0
                 row["scroll"] = 0
+        set_custom_rows(rows, {})
     except OSError as e:
         return False, f"Failed to reset: {e}"
 
@@ -2520,6 +2565,8 @@ def export_settings(rows, path):
             choice_value = _choice_value(row)
             if choice_value is not None:
                 features[row["key"]] = choice_value
+        elif row["type"] == ROW_CUSTOM:
+            features[row["key"]] = row["value"]
         elif row["type"] == ROW_DNS:
             dns_mode = row["options"][row["selected"]]
         elif row["type"] == ROW_DNS_TEMPLATE:
@@ -2569,6 +2616,22 @@ def _write_export(path, text):
     except OSError as e:
         return [False, f"Export failed: {e}"]
     return [True, f"Exported to {path}"]
+
+
+def _plist_safe(value):
+    """True when `value` can be written to a plist as a policy value.
+
+    JSON `null` has no plist equivalent, and one anywhere inside an array
+    or object makes plistlib refuse the whole policy file.
+    """
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _plist_safe(v)
+                   for k, v in value.items())
+    if isinstance(value, list):
+        return all(_plist_safe(v) for v in value)
+    return isinstance(value, (bool, int, float, str))
 
 
 def _parse_imported_features(features_obj):
@@ -2623,6 +2686,27 @@ def import_settings(rows, path):
     if not isinstance(features, (dict, list)):
         return False, "Invalid config: no Features block (not a SlimBrave Neo config)"
     features_map, is_legacy = _parse_imported_features(features)
+
+    # A Features key no row claims is a custom policy: it is kept verbatim
+    # and written by Apply, instead of being dropped on the floor. The DNS
+    # keys are excluded because the DnsMode/DnsTemplates fields own them.
+    # The legacy array format carries no values, so there is nothing to keep.
+    known = {row["key"] for row in rows
+             if row["type"] in (ROW_FEATURE, ROW_CHOICE)}
+    known |= {"DnsOverHttpsMode", "DnsOverHttpsTemplates"}
+    custom = {}
+    skipped_custom = []
+    skipped_platform = []
+    if not is_legacy:
+        for key, value in features_map.items():
+            if key in known:
+                continue
+            if key in NOT_CUSTOM_POLICIES:
+                skipped_platform.append(key)
+            elif _plist_safe(value):
+                custom[key] = value
+            else:
+                skipped_custom.append(key)
 
     # Values left unmanaged and named in the result message: a choice
     # key's value that is not a legal member of its enum, a value outside
@@ -2715,10 +2799,21 @@ def import_settings(rows, path):
             row["scroll"] = 0
 
     dropped = _enforce_groups(rows)
+    set_custom_rows(rows, custom)
     msg = f"Imported from {path}"
     if skipped_choices:
         msg += ("; left unmanaged because the value is not one this policy "
                 "accepts: " + ", ".join(skipped_choices))
+    if skipped_custom:
+        msg += ("; left out because a plist cannot store its value: "
+                + ", ".join(skipped_custom))
+    if skipped_platform:
+        msg += ("; left out because this platform does not manage it: "
+                + ", ".join(skipped_platform))
+    if custom:
+        n = len(custom)
+        msg += (f"; kept {n} custom polic{'y' if n == 1 else 'ies'}: "
+                + ", ".join(sorted(custom)))
     if skipped_inert:
         n = len(skipped_inert)
         msg += (f"; {n} key{'s' if n != 1 else ''} built into Brave Origin "
@@ -2964,6 +3059,11 @@ def describe_row(rows, cursor_idx, focus, btn_idx):
     row = rows[cursor_idx]
     kind = row["type"]
     if kind == ROW_HEADER:
+        if row.get("custom"):
+            return ("Custom Policies: keys this config carries that SlimBrave "
+                    "has no row for. Apply writes them and Export saves them "
+                    "back; edit the config file to change them. Reset removes "
+                    "them.")
         on, total = header_counts(rows, cursor_idx)
         inert = header_inert_count(rows, cursor_idx)
         if total or inert:
@@ -3063,7 +3163,9 @@ def apply_startup_collapse(rows):
 
 
 def row_matches_filter(row, needle):
-    """True when a feature or choice row's name contains `needle`."""
+    """True when a feature, choice or custom row's name contains `needle`."""
+    if row["type"] == ROW_CUSTOM:
+        return needle in row["key"].lower()
     if row["type"] not in (ROW_FEATURE, ROW_CHOICE):
         return False
     return needle in row["text"].lower()
@@ -3287,6 +3389,12 @@ def draw(stdscr, rows, cursor_idx, scroll_offset, focus, btn_idx,
                 attr = curses.color_pair(CP_CHECKED)
             else:
                 attr = curses.color_pair(CP_NORMAL)
+        elif row["type"] == ROW_CUSTOM:
+            # Read-only: no cursor can land here, so no key ever edits it.
+            val = row["value"]
+            shown = val if isinstance(val, str) else json.dumps(val)
+            line = f"    {row['key']} = {shown}"
+            attr = curses.color_pair(CP_CHECKED)
         elif row["type"] == ROW_DNS:
             current = row["options"][row["selected"]]
             line = f"    < {current} >"
